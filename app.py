@@ -25,6 +25,7 @@ import threading
 from streamlit.runtime.scriptrunner import add_script_run_ctx
 from wa_analyzer.src.parser import WhatsappParser
 from wa_analyzer.src.analyzer import WhatsappAnalyzer
+from wa_analyzer.src.utils import Utils
 from wa_analyzer.src.chat_viewer import (
     generate_chat_html,
     export_chat_json,
@@ -985,8 +986,28 @@ def load_archived_chat_ids(msgstore_path):
     return frozenset(int(row[0]) for row in rows if row and row[0] is not None)
 
 
+def _format_inbox_gender(value):
+    value = str(value).strip().lower() if value is not None else "unknown"
+    labels = {
+        "male": "Male",
+        "female": "Female",
+        "unknown": "Unknown",
+        "group": "Group",
+        "newsletter": "Newsletter",
+    }
+    return labels.get(value, value.title() if value else "Unknown")
+
+
 def build_chat_label_frame(df_context):
-    cols = ["chat_id", "type", "chat", "contact_name", "number", "last_message_at"]
+    cols = [
+        "chat_id",
+        "type",
+        "gender",
+        "chat",
+        "contact_name",
+        "number",
+        "last_message_at",
+    ]
     if (
         df_context is None
         or df_context.empty
@@ -1005,6 +1026,7 @@ def build_chat_label_frame(df_context):
         valid = valid[valid.astype(str).str.strip() != ""]
         return valid.iloc[0] if not valid.empty else default
 
+    utils = Utils()
     rows = []
     for chat_id, chat_df in df.groupby("chat_id", sort=False):
         raw_string = str(_first_valid(chat_df.get("raw_string", pd.Series(dtype=str))))
@@ -1014,21 +1036,39 @@ def build_chat_label_frame(df_context):
 
         if raw_string.endswith("@g.us"):
             chat_type = "Group"
+            chat_gender = "group"
             number = ""
             contact_name = ""
         elif raw_string.endswith("@newsletter") or raw_string == "status@broadcast":
             chat_type = "Newsletter"
+            chat_gender = "newsletter"
             number = ""
             contact_name = ""
         else:
             chat_type = "Individual"
             number = raw_string.split("@", 1)[0] if "@" in raw_string else raw_string
             contact_name = chat_name
+            if "gender" in chat_df.columns:
+                from_me_values = (
+                    pd.to_numeric(chat_df["from_me"], errors="coerce").fillna(0)
+                    if "from_me" in chat_df.columns
+                    else pd.Series(0, index=chat_df.index)
+                )
+                incoming = chat_df[from_me_values == 0]
+                gender_source = incoming if not incoming.empty else chat_df
+                chat_gender = str(
+                    _first_valid(gender_source.get("gender", pd.Series(dtype=str)))
+                ).lower()
+                if chat_gender not in {"male", "female", "unknown"}:
+                    chat_gender = utils.guess_gender(contact_name)
+            else:
+                chat_gender = utils.guess_gender(contact_name)
 
         rows.append(
             {
                 "chat_id": int(chat_id),
                 "type": chat_type,
+                "gender": chat_gender,
                 "chat": chat_name,
                 "contact_name": contact_name if chat_type == "Individual" else "",
                 "number": number,
@@ -1045,6 +1085,7 @@ def build_unanswered_chats(df_context, backup_latest_ts):
     empty_cols = [
         "chat_id",
         "type",
+        "gender",
         "chat",
         "contact_name",
         "number",
@@ -1154,6 +1195,7 @@ def build_unanswered_chats(df_context, backup_latest_ts):
             {
                 "chat_id": int(chat_id),
                 "type": meta["type"],
+                "gender": meta["gender"],
                 "chat": meta["chat"],
                 "contact_name": meta["contact_name"],
                 "number": meta["number"],
@@ -1186,6 +1228,7 @@ def build_unread_chats_for_context(df_context, msgstore_path):
             columns=[
                 "chat_id",
                 "type",
+                "gender",
                 "chat",
                 "contact_name",
                 "number",
@@ -4862,6 +4905,30 @@ if "data" in st.session_state:
             display_df["number"] = display_df["number"].map(_anon_number)
             return display_df
 
+        def _add_inbox_split_label(source_df, split_by):
+            split_df = source_df.copy()
+            if split_df.empty:
+                split_df["split_label"] = pd.Series(dtype=str)
+                return split_df
+
+            if split_by == "Gender":
+                gender_values = (
+                    split_df["gender"]
+                    if "gender" in split_df.columns
+                    else pd.Series("unknown", index=split_df.index)
+                )
+                split_df["split_label"] = gender_values.fillna("unknown").map(
+                    _format_inbox_gender
+                )
+            else:
+                type_values = (
+                    split_df["type"]
+                    if "type" in split_df.columns
+                    else pd.Series("Unknown", index=split_df.index)
+                )
+                split_df["split_label"] = type_values.fillna("Unknown")
+            return split_df
+
         with st.spinner("Reading inbox state..."):
             backup_latest = load_backup_message_horizon(msgstore_path)
             unread_df = build_unread_chats_for_context(df_base, msgstore_path)
@@ -4937,6 +5004,11 @@ if "data" in st.session_state:
                     ["Last message (newest)", "Unread messages", "Chat"],
                     key="inbox_unread_sort",
                 )
+                unread_split = st.selectbox(
+                    "Break unread charts by",
+                    ["Type", "Gender"],
+                    key="inbox_unread_split",
+                )
                 unread_sorted = unread_df.copy()
                 if sort_choice == "Unread messages":
                     unread_sorted = unread_sorted.sort_values(
@@ -4964,6 +5036,7 @@ if "data" in st.session_state:
                     columns={
                         "chat": "Chat",
                         "type": "Type",
+                        "gender": "Gender",
                         "contact_name": "Contact",
                         "number": "Number",
                         "unread_count_display": "Unread",
@@ -4977,11 +5050,15 @@ if "data" in st.session_state:
                         "archived": "Archived",
                     }
                 )
+                unread_display["Gender"] = unread_display["Gender"].map(
+                    _format_inbox_gender
+                )
                 st.dataframe(
                     unread_display[
                         [
                             "Chat",
                             "Type",
+                            "Gender",
                             "Contact",
                             "Number",
                             "Unread",
@@ -5000,29 +5077,31 @@ if "data" in st.session_state:
                 )
 
                 chart_l, chart_r = st.columns(2)
+                unread_chart_df = _add_inbox_split_label(unread_df, unread_split)
+                split_name = "gender" if unread_split == "Gender" else "type"
                 with chart_l:
-                    unread_by_type = (
-                        unread_df.groupby("type", as_index=False)
+                    unread_by_split = (
+                        unread_chart_df.groupby("split_label", as_index=False)
                         .size()
                         .rename(columns={"size": "chats"})
                     )
                     fig = px.pie(
-                        unread_by_type,
-                        names="type",
+                        unread_by_split,
+                        names="split_label",
                         values="chats",
-                        title="Unread chats by type",
+                        title=f"Unread chats by {split_name}",
                     )
                     st.plotly_chart(fig, width="stretch")
 
                 with chart_r:
-                    unread_messages_by_type = unread_df.groupby(
-                        "type", as_index=False
+                    unread_messages_by_split = unread_chart_df.groupby(
+                        "split_label", as_index=False
                     )["unread_messages"].sum()
                     fig = px.pie(
-                        unread_messages_by_type,
-                        names="type",
+                        unread_messages_by_split,
+                        names="split_label",
                         values="unread_messages",
-                        title="Unread message count by type",
+                        title=f"Unread message count by {split_name}",
                     )
                     st.plotly_chart(fig, width="stretch")
 
@@ -5034,11 +5113,15 @@ if "data" in st.session_state:
                     top_unread["Unread"], errors="coerce"
                 ).fillna(0)
                 top_unread = top_unread.nlargest(20, "Unread numeric")
+                top_unread["Gender"] = top_unread.get("Gender", "unknown").map(
+                    _format_inbox_gender
+                )
+                color_col = "Gender" if unread_split == "Gender" else "Type"
                 fig = px.bar(
                     top_unread,
                     x="Unread numeric",
                     y="Chat",
-                    color="Type",
+                    color=color_col,
                     orientation="h",
                     title="Top unread chats",
                 )
@@ -5090,6 +5173,7 @@ if "data" in st.session_state:
                     columns={
                         "chat": "Chat",
                         "type": "Type",
+                        "gender": "Gender",
                         "contact_name": "Contact",
                         "number": "Number",
                         "messages_since_reply": "Messages",
@@ -5103,11 +5187,13 @@ if "data" in st.session_state:
                         "is_unread": "Unread too",
                     }
                 )
+                table_df["Gender"] = table_df["Gender"].map(_format_inbox_gender)
                 st.dataframe(
                     table_df[
                         [
                             "Chat",
                             "Type",
+                            "Gender",
                             "Contact",
                             "Number",
                             "Messages",
@@ -5151,6 +5237,17 @@ if "data" in st.session_state:
                 return
 
             unanswered_display = _prepare_inbox_display(unanswered_df)
+            unanswered_split = st.selectbox(
+                "Break needs-reply charts by",
+                ["Type", "Gender"],
+                key="inbox_unanswered_split",
+            )
+            unanswered_chart_df = _add_inbox_split_label(
+                unanswered_df, unanswered_split
+            )
+            unanswered_split_name = (
+                "gender" if unanswered_split == "Gender" else "type"
+            )
 
             if overlap:
                 st.subheader("Unread Chats That Also Need Reply")
@@ -5184,6 +5281,7 @@ if "data" in st.session_state:
                     columns={
                         "chat": "Chat",
                         "type": "Type",
+                        "gender": "Gender",
                         "number": "Number",
                         "unread_count_display": "Unread",
                         "messages_since_reply": "Needs-reply messages",
@@ -5194,11 +5292,15 @@ if "data" in st.session_state:
                         "reason": "Why included",
                     }
                 )
+                overlap_display["Gender"] = overlap_display["Gender"].map(
+                    _format_inbox_gender
+                )
                 st.dataframe(
                     overlap_display[
                         [
                             "Chat",
                             "Type",
+                            "Gender",
                             "Number",
                             "Unread",
                             "Needs-reply messages",
@@ -5215,38 +5317,38 @@ if "data" in st.session_state:
 
             chart_a, chart_b = st.columns(2)
             with chart_a:
-                by_type = (
-                    unanswered_df.groupby("type", as_index=False)
+                by_split = (
+                    unanswered_chart_df.groupby("split_label", as_index=False)
                     .size()
                     .rename(columns={"size": "chats"})
                 )
                 fig = px.pie(
-                    by_type,
-                    names="type",
+                    by_split,
+                    names="split_label",
                     values="chats",
-                    title="Needs-reply chats by type",
+                    title=f"Needs-reply chats by {unanswered_split_name}",
                 )
                 st.plotly_chart(fig, width="stretch")
 
             with chart_b:
-                words_by_type = unanswered_df.groupby("type", as_index=False)[
-                    "words_since_reply"
-                ].sum()
+                words_by_split = unanswered_chart_df.groupby(
+                    "split_label", as_index=False
+                )["words_since_reply"].sum()
                 fig = px.pie(
-                    words_by_type,
-                    names="type",
+                    words_by_split,
+                    names="split_label",
                     values="words_since_reply",
-                    title="Unanswered words by type",
+                    title=f"Unanswered words by {unanswered_split_name}",
                 )
                 st.plotly_chart(fig, width="stretch")
 
-            scatter_df = unanswered_display.copy()
+            scatter_df = _add_inbox_split_label(unanswered_display, unanswered_split)
             fig = px.scatter(
                 scatter_df,
                 x="messages_since_reply",
                 y="words_since_reply",
                 size="attention_score",
-                color="type",
+                color="split_label",
                 hover_name="chat",
                 hover_data={
                     "question_marks": True,
@@ -5261,12 +5363,14 @@ if "data" in st.session_state:
             )
             st.plotly_chart(fig, width="stretch")
 
-            top_pressure = unanswered_display.nlargest(20, "attention_score")
+            top_pressure = _add_inbox_split_label(
+                unanswered_display.nlargest(20, "attention_score"), unanswered_split
+            )
             fig = px.bar(
                 top_pressure,
                 x="attention_score",
                 y="chat",
-                color="type",
+                color="split_label",
                 orientation="h",
                 title="Highest attention score",
                 labels={"attention_score": "Attention score", "chat": "Chat"},
