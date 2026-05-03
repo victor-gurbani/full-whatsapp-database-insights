@@ -25,7 +25,7 @@ import threading
 from streamlit.runtime.scriptrunner import add_script_run_ctx
 from wa_analyzer.src.parser import WhatsappParser
 from wa_analyzer.src.analyzer import WhatsappAnalyzer
-from wa_analyzer.src.utils import Utils
+from wa_analyzer.src.utils import Utils, get_user_timezone, to_user_datetime
 from wa_analyzer.src.chat_viewer import (
     generate_chat_html,
     export_chat_json,
@@ -57,8 +57,6 @@ import re
 import numpy as np
 import string
 import random as _random
-
-USER_TIMEZONE = "Europe/Madrid"
 
 
 # --- Anonymisation Helpers ---
@@ -736,10 +734,10 @@ def load_group_receipt_events(msgstore_path, group_jid):
     if raw.empty:
         return pd.DataFrame(columns=cols)
 
-    raw["msg_timestamp"] = _to_user_datetime(
+    raw["msg_timestamp"] = to_user_datetime(
         pd.to_numeric(raw["message_ts"], errors="coerce"), unit="ms"
     )
-    raw["read_timestamp"] = _to_user_datetime(raw["event_ts"], unit="ms")
+    raw["read_timestamp"] = to_user_datetime(raw["event_ts"], unit="ms")
     raw = raw.dropna(subset=["msg_timestamp", "read_timestamp", "reader_jid"])
 
     if raw.empty:
@@ -857,18 +855,8 @@ def _format_backup_horizon(value):
         return ""
     ts = pd.Timestamp(value)
     if ts.tzinfo is not None:
-        ts = ts.tz_convert(USER_TIMEZONE).tz_localize(None)
+        ts = ts.tz_convert(get_user_timezone()).tz_localize(None)
     return ts.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _to_user_datetime(values, unit="ms"):
-    """Convert WhatsApp UTC millisecond timestamps to the user's local wall time."""
-    converted = pd.to_datetime(values, unit=unit, errors="coerce", utc=True)
-    if isinstance(converted, pd.Series):
-        return converted.dt.tz_convert(USER_TIMEZONE).dt.tz_localize(None)
-    if pd.isna(converted):
-        return converted
-    return converted.tz_convert(USER_TIMEZONE).tz_localize(None)
 
 
 def _coerce_bar_chart_data(data):
@@ -902,7 +890,7 @@ def load_backup_message_horizon(msgstore_path):
     value = pd.to_numeric(value, errors="coerce")
     if pd.isna(value) or value <= 0:
         return pd.NaT
-    return _to_user_datetime(value, unit="ms")
+    return to_user_datetime(value, unit="ms")
 
 
 @st.cache_data(show_spinner=False)
@@ -968,7 +956,7 @@ def load_unread_chat_counters(msgstore_path):
         default="Unread activity",
     )
     unread_df["unread_messages"] = unread_df["unread_messages"].clip(lower=0)
-    unread_df["last_message_at"] = _to_user_datetime(
+    unread_df["last_message_at"] = to_user_datetime(
         pd.to_numeric(unread_df["sort_timestamp"], errors="coerce"),
         unit="ms",
     )

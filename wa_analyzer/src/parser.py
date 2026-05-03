@@ -2,19 +2,7 @@ import sqlite3
 import pandas as pd
 import vobject
 import os
-
-
-USER_TIMEZONE = "Europe/Madrid"
-
-
-def _to_user_datetime(values, unit="ms"):
-    """Convert WhatsApp UTC millisecond timestamps to the user's local wall time."""
-    converted = pd.to_datetime(values, unit=unit, errors="coerce", utc=True)
-    if isinstance(converted, pd.Series):
-        return converted.dt.tz_convert(USER_TIMEZONE).dt.tz_localize(None)
-    if pd.isna(converted):
-        return converted
-    return converted.tz_convert(USER_TIMEZONE).tz_localize(None)
+from .utils import to_user_datetime
 
 
 class WhatsappParser:
@@ -102,7 +90,7 @@ class WhatsappParser:
                 return pd.DataFrame()
 
         # Convert timestamp to datetime (typically ms in WhatsApp)
-        df["timestamp"] = _to_user_datetime(df["timestamp"], unit="ms")
+        df["timestamp"] = to_user_datetime(df["timestamp"], unit="ms")
         return df
 
     def parse_jids(self):
@@ -360,7 +348,7 @@ class WhatsappParser:
         ):
             read_at_numeric = pd.to_numeric(messages_df["read_at"], errors="coerce")
             mask_invalid = read_at_numeric.isna() | (read_at_numeric <= 0)
-            messages_df["read_at"] = _to_user_datetime(
+            messages_df["read_at"] = to_user_datetime(
                 read_at_numeric.where(~mask_invalid), unit="ms"
             )
 
@@ -373,7 +361,7 @@ class WhatsappParser:
                 mask_invalid = messages_df["receipt_server_timestamp"].isna() | (
                     messages_df["receipt_server_timestamp"] <= 0
                 )
-                messages_df["receipt_server_timestamp"] = _to_user_datetime(
+                messages_df["receipt_server_timestamp"] = to_user_datetime(
                     messages_df["receipt_server_timestamp"].where(~mask_invalid),
                     unit="ms",
                 )
@@ -390,7 +378,7 @@ class WhatsappParser:
                 mask_invalid = messages_df["received_timestamp"].isna() | (
                     messages_df["received_timestamp"] <= 0
                 )
-                messages_df["received_timestamp"] = _to_user_datetime(
+                messages_df["received_timestamp"] = to_user_datetime(
                     messages_df["received_timestamp"].where(~mask_invalid),
                     unit="ms",
                 )

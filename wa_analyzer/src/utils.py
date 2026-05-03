@@ -1,5 +1,39 @@
 import gender_guesser.detector as gender
+import datetime
+import os
 import re
+import pandas as pd
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+
+def get_user_timezone():
+    """Return the timezone configured on the computer running the app."""
+    tz_name = os.environ.get("TZ")
+    if not tz_name and os.path.exists("/etc/localtime"):
+        localtime_path = os.path.realpath("/etc/localtime")
+        marker = "zoneinfo/"
+        if marker in localtime_path:
+            tz_name = localtime_path.split(marker, 1)[1]
+
+    if tz_name:
+        try:
+            return ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            pass
+
+    return datetime.datetime.now().astimezone().tzinfo
+
+
+def to_user_datetime(values, unit="ms"):
+    """Convert WhatsApp UTC timestamps to the computer's local wall time."""
+    converted = pd.to_datetime(values, unit=unit, errors="coerce", utc=True)
+    user_timezone = get_user_timezone()
+    if isinstance(converted, pd.Series):
+        return converted.dt.tz_convert(user_timezone).dt.tz_localize(None)
+    if pd.isna(converted):
+        return converted
+    return converted.tz_convert(user_timezone).tz_localize(None)
+
 
 class Utils:
     def __init__(self):
