@@ -396,12 +396,12 @@ class WhatsappAnalyzer:
 
     def get_activity_over_time_by_contact(self, contact_list):
         """
-        Returns monthly activity for specific contacts.
+        Returns monthly activity for specific chats.
         """
-        df_filtered = self.data[self.data["contact_name"].isin(contact_list)]
+        df_filtered = self.data[self.data["chat_name"].isin(contact_list)]
         return (
             df_filtered.set_index("timestamp")
-            .groupby("contact_name")
+            .groupby("chat_name")
             .resample("ME", include_groups=False)
             .size()
             .unstack(level=0)
