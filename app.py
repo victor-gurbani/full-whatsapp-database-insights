@@ -627,6 +627,7 @@ def get_config_json():
         "cfg_vcf",
         "cfg_date_range",
         "cfg_ex_groups",
+        "cfg_ex_archived",
         "cfg_ex_chan",
         "cfg_ex_system",
         "cfg_fam_list",
@@ -949,6 +950,27 @@ def load_unread_chat_counters(msgstore_path):
         errors="coerce",
     )
     return unread_df[empty_unread_cols]
+
+
+@st.cache_data(show_spinner=False)
+def load_archived_chat_ids(msgstore_path):
+    """Load chat row ids that WhatsApp currently marks as archived."""
+    if not msgstore_path or not os.path.exists(msgstore_path):
+        return frozenset()
+
+    conn = None
+    try:
+        conn = sqlite3.connect(msgstore_path)
+        rows = conn.execute(
+            "SELECT _id FROM chat WHERE COALESCE(archived, 0) != 0"
+        ).fetchall()
+    except Exception:
+        return frozenset()
+    finally:
+        if conn is not None:
+            conn.close()
+
+    return frozenset(int(row[0]) for row in rows if row and row[0] is not None)
 
 
 def build_chat_label_frame(df_context):
@@ -1329,6 +1351,13 @@ if "data" in st.session_state:
     with st.sidebar.expander("🔍 Filters", expanded=True):
         exclude_groups = st.checkbox("Exclude Groups", value=False, key="cfg_ex_groups")
 
+        exclude_archived = st.checkbox(
+            "Exclude Archived Chats",
+            value=False,
+            key="cfg_ex_archived",
+            help="Removes chats currently marked archived in msgstore.db from all tabs and stats.",
+        )
+
         exclude_low_participation = st.checkbox(
             "Exclude Low-Participation Groups",
             value=True,
@@ -1441,6 +1470,8 @@ if "data" in st.session_state:
         date_start,
         date_end,
         exclude_groups,
+        exclude_archived,
+        archived_chat_ids,
         exclude_low_participation,
         exclude_channels,
         exclude_family_global,
@@ -1470,6 +1501,17 @@ if "data" in st.session_state:
         if exclude_groups and "raw_string" in df_base.columns:
             is_group = df_base["raw_string"].astype(str).str.endswith("@g.us")
             df_base = df_base[~is_group]
+
+        if exclude_archived and archived_chat_ids and "chat_row_id" in df_base.columns:
+            df_base = df_base[~df_base["chat_row_id"].isin(archived_chat_ids)]
+        if (
+            exclude_archived
+            and archived_chat_ids
+            and "chat_row_id" in df_group_base.columns
+        ):
+            df_group_base = df_group_base[
+                ~df_group_base["chat_row_id"].isin(archived_chat_ids)
+            ]
 
         if exclude_low_participation and "raw_string" in df_base.columns:
             is_group_mask = df_base["raw_string"].astype(str).str.endswith("@g.us")
@@ -1521,11 +1563,14 @@ if "data" in st.session_state:
 
     date_start = date_range[0] if len(date_range) == 2 else None
     date_end = date_range[1] if len(date_range) == 2 else None
+    archived_chat_ids = load_archived_chat_ids(msgstore_path)
     df_base, df_group_base = _apply_global_filters(
         df_raw,
         date_start,
         date_end,
         exclude_groups,
+        exclude_archived,
+        archived_chat_ids,
         exclude_low_participation,
         exclude_channels,
         exclude_family_global,
