@@ -239,12 +239,14 @@ class WhatsappAnalyzer:
             counts = df["chat_name"].value_counts().head(n).reset_index()
             counts.columns = ["contact_name", "count"]
 
-        # Mapping for efficiency (from Chat Name)
-        # Note: Gender of a 'Chat' (1-on-1) is the gender of the person.
-        # Gender of a Group is None/Unknown.
-        meta_map = df.drop_duplicates("chat_name").set_index("chat_name")[
-            ["gender", "is_group"]
-        ]
+        # Prefer incoming rows for chat metadata so outgoing "You" rows do not
+        # make a direct chat look gender-unknown when they happen to come first.
+        incoming_meta = df[df["from_me"] == 0].drop_duplicates("chat_name")
+        fallback_meta = df.drop_duplicates("chat_name")
+        meta_df = pd.concat([incoming_meta, fallback_meta]).drop_duplicates(
+            "chat_name", keep="first"
+        )
+        meta_map = meta_df.set_index("chat_name")[["gender", "is_group"]]
         counts = counts.merge(
             meta_map, left_on="contact_name", right_index=True, how="left"
         )
