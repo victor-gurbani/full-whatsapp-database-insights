@@ -5,6 +5,16 @@ def run_app() -> None:
     import matplotlib.pyplot as plt
     import streamlit as st
 
+    plt.rcParams["font.family"] = ["sans-serif"]
+    plt.rcParams["font.sans-serif"] = [
+        "Helvetica",
+        "Arial",
+        "Apple Color Emoji",
+        "Segoe UI Emoji",
+        "Noto Color Emoji",
+        "DejaVu Sans",
+    ]
+
     from wa_analyzer.app.privacy import av
     from wa_analyzer.app.sidebar import render_sidebar
     from wa_analyzer.app.tabs import (
