@@ -652,8 +652,19 @@ def get_config_json():
     return json.dumps(config, indent=2, sort_keys=True)
 
 
+def get_file_signature(path):
+    """Return a stable cache-busting signature for files that may be replaced in place."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
 @st.cache_data(show_spinner=False)
-def load_group_receipt_events(msgstore_path, group_jid):
+def load_group_receipt_events(msgstore_path, group_jid, file_signature=None):
     """
     Load per-recipient read events for outgoing messages in a specific group.
     Returns one earliest read event per (message_row_id, reader_jid).
@@ -751,7 +762,7 @@ def load_group_receipt_events(msgstore_path, group_jid):
 
 
 @st.cache_data(show_spinner=False)
-def load_lid_jid_map(msgstore_path):
+def load_lid_jid_map(msgstore_path, file_signature=None):
     """
     Load LID -> PN JID row-id mappings from msgstore jid_map.
     Returns dict {lid_row_id: jid_row_id}.
@@ -793,7 +804,7 @@ def load_lid_jid_map(msgstore_path):
 
 
 @st.cache_data(show_spinner=False)
-def load_jid_raw_lookup(msgstore_path):
+def load_jid_raw_lookup(msgstore_path, file_signature=None):
     """
     Load jid row-id -> raw_string for fallback labeling.
     """
@@ -872,7 +883,7 @@ def _coerce_bar_chart_data(data):
 
 
 @st.cache_data(show_spinner=False)
-def load_backup_message_horizon(msgstore_path):
+def load_backup_message_horizon(msgstore_path, file_signature=None):
     """Return the latest message timestamp available in the backup."""
     if not msgstore_path or not os.path.exists(msgstore_path):
         return pd.NaT
@@ -894,7 +905,7 @@ def load_backup_message_horizon(msgstore_path):
 
 
 @st.cache_data(show_spinner=False)
-def load_unread_chat_counters(msgstore_path):
+def load_unread_chat_counters(msgstore_path, file_signature=None):
     """Load WhatsApp unread counters from chat metadata."""
     empty_unread_cols = [
         "chat_id",
@@ -964,7 +975,7 @@ def load_unread_chat_counters(msgstore_path):
 
 
 @st.cache_data(show_spinner=False)
-def load_archived_chat_ids(msgstore_path):
+def load_archived_chat_ids(msgstore_path, file_signature=None):
     """Load chat row ids that WhatsApp currently marks as archived."""
     if not msgstore_path or not os.path.exists(msgstore_path):
         return frozenset()
@@ -1218,9 +1229,9 @@ def build_unanswered_chats(df_context, backup_latest_ts):
     return unanswered_df
 
 
-def build_unread_chats_for_context(df_context, msgstore_path):
+def build_unread_chats_for_context(df_context, msgstore_path, file_signature=None):
     labels = build_chat_label_frame(df_context)
-    counters = load_unread_chat_counters(msgstore_path)
+    counters = load_unread_chat_counters(msgstore_path, file_signature)
     if labels.empty or counters.empty:
         return pd.DataFrame(
             columns=[
@@ -1307,6 +1318,7 @@ with st.sidebar.expander("📂 Data Source", expanded="data" not in st.session_s
 
 if "data" in st.session_state:
     df_raw = st.session_state["data"]
+    msgstore_file_signature = get_file_signature(msgstore_path)
 
     # --- Apply Anonymisation (before any filtering/display) ---
     _anon_mode_label = st.session_state.get("cfg_anon_mode", "Off")
@@ -1380,7 +1392,9 @@ if "data" in st.session_state:
         st.caption(
             f"**{av(n_sent, _anon_numbers):,}** sent · **{av(n_recv, _anon_numbers):,}** received"
         )
-        backup_message_horizon = load_backup_message_horizon(msgstore_path)
+        backup_message_horizon = load_backup_message_horizon(
+            msgstore_path, msgstore_file_signature
+        )
         if pd.notna(backup_message_horizon):
             st.caption(
                 f"Backup message horizon: **{_format_backup_horizon(backup_message_horizon)}**"
@@ -1610,7 +1624,7 @@ if "data" in st.session_state:
 
     date_start = date_range[0] if len(date_range) == 2 else None
     date_end = date_range[1] if len(date_range) == 2 else None
-    archived_chat_ids = load_archived_chat_ids(msgstore_path)
+    archived_chat_ids = load_archived_chat_ids(msgstore_path, msgstore_file_signature)
     df_base, df_group_base = _apply_global_filters(
         df_raw,
         date_start,
@@ -3263,8 +3277,12 @@ if "data" in st.session_state:
             with st.spinner("Loading group data..."):
                 groups_df = df_group_base[df_group_base["is_group"] == True].copy()
                 groups_df = groups_df[groups_df["chat_name"].notnull()]
-                lid_to_pn_map = load_lid_jid_map(msgstore_path)
-                jid_raw_lookup = load_jid_raw_lookup(msgstore_path)
+                lid_to_pn_map = load_lid_jid_map(
+                    msgstore_path, msgstore_file_signature
+                )
+                jid_raw_lookup = load_jid_raw_lookup(
+                    msgstore_path, msgstore_file_signature
+                )
                 vcf_contact_lookup = load_vcf_contact_lookup(vcf_path)
                 lids_by_pn = {}
                 for lid_id, pn_id in lid_to_pn_map.items():
@@ -3562,7 +3580,7 @@ if "data" in st.session_state:
                         group_jids = gdf["raw_string"].dropna().astype(str)
                         group_jid = group_jids.iloc[0] if not group_jids.empty else None
                         receipt_events = load_group_receipt_events(
-                            msgstore_path, group_jid
+                            msgstore_path, group_jid, msgstore_file_signature
                         )
 
                         member_read_avg = pd.Series(dtype="float64")
@@ -4922,8 +4940,12 @@ if "data" in st.session_state:
             return split_df
 
         with st.spinner("Reading inbox state..."):
-            backup_latest = load_backup_message_horizon(msgstore_path)
-            unread_df = build_unread_chats_for_context(df_base, msgstore_path)
+            backup_latest = load_backup_message_horizon(
+                msgstore_path, msgstore_file_signature
+            )
+            unread_df = build_unread_chats_for_context(
+                df_base, msgstore_path, msgstore_file_signature
+            )
             unanswered_df = build_unanswered_chats(df_base, backup_latest)
 
         if unread_df.empty and unanswered_df.empty:
