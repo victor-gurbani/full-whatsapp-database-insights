@@ -103,10 +103,84 @@ def apply_anon_to_df(df, anon_map, cols=("contact_name", "chat_name", "subject")
     """Apply anonymisation mapping to identity columns in-place and return df."""
     if not anon_map:
         return df
+
+    def _anon_value(value):
+        return anon_map.get(value, value)
+
     for col in cols:
         if col in df.columns:
-            df[col] = df[col].map(lambda v: anon_map.get(v, v))
+            df[col] = df[col].map(_anon_value)
+
+    if "reactions_list" in df.columns:
+        def _anon_reactions(value):
+            if not isinstance(value, list):
+                return value
+            anonymized = []
+            for reaction_tuple in value:
+                if isinstance(reaction_tuple, (list, tuple)) and len(reaction_tuple) >= 2:
+                    anonymized.append((reaction_tuple[0], _anon_value(reaction_tuple[1])))
+                else:
+                    anonymized.append(reaction_tuple)
+            return anonymized
+
+        df["reactions_list"] = df["reactions_list"].map(_anon_reactions)
+
+    if "mentions_name_list" in df.columns:
+        def _anon_mention_names(value):
+            if not isinstance(value, list):
+                return value
+            return [_anon_value(name) for name in value]
+
+        df["mentions_name_list"] = df["mentions_name_list"].map(_anon_mention_names)
+
+    if "mentions_pairs" in df.columns:
+        def _anon_mention_pairs(value):
+            if not isinstance(value, list):
+                return value
+            anonymized = []
+            for mention_tuple in value:
+                if isinstance(mention_tuple, (list, tuple)) and len(mention_tuple) >= 2:
+                    anonymized.append((mention_tuple[0], _anon_value(mention_tuple[1])))
+                else:
+                    anonymized.append(mention_tuple)
+            return anonymized
+
+        df["mentions_pairs"] = df["mentions_pairs"].map(_anon_mention_pairs)
+
     return df
+
+
+def collect_nested_identity_values(df):
+    """Collect names embedded in list/tuple columns so anonymisation covers them."""
+    values = set()
+
+    def _add(value):
+        if pd.notna(value):
+            values.add(value)
+
+    if "reactions_list" in df.columns:
+        for reactions in df["reactions_list"].dropna():
+            if not isinstance(reactions, list):
+                continue
+            for reaction_tuple in reactions:
+                if isinstance(reaction_tuple, (list, tuple)) and len(reaction_tuple) >= 2:
+                    _add(reaction_tuple[1])
+
+    if "mentions_name_list" in df.columns:
+        for mentions in df["mentions_name_list"].dropna():
+            if isinstance(mentions, list):
+                for name in mentions:
+                    _add(name)
+
+    if "mentions_pairs" in df.columns:
+        for mentions in df["mentions_pairs"].dropna():
+            if not isinstance(mentions, list):
+                continue
+            for mention_tuple in mentions:
+                if isinstance(mention_tuple, (list, tuple)) and len(mention_tuple) >= 2:
+                    _add(mention_tuple[1])
+
+    return values
 
 
 def av(value, anon_numbers=False, rng_seed=None):
@@ -1338,6 +1412,7 @@ if "data" in st.session_state:
         for _col in ("contact_name", "chat_name", "subject"):
             if _col in df_raw.columns:
                 _all_names.update(df_raw[_col].dropna().unique())
+        _all_names.update(collect_nested_identity_values(df_raw))
         _anon_map = build_anon_map(frozenset(_all_names), _anon_key)
         # Only re-anonymize when mode changes or data was reloaded
         _anon_cache_key = f"_anon_df_{_anon_key}"
