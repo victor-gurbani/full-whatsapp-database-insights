@@ -2600,7 +2600,7 @@ if "data" in st.session_state:
     @st.fragment
     def _frag_chat_explorer():
         st.header("Chat Explorer & Deep Dive")
-        contacts = sorted(filtered_df["contact_name"].unique().astype(str))
+        contacts = sorted(df_base["chat_name"].dropna().unique().astype(str))
         selected_contact = st.selectbox(
             "Select Contact", contacts, key="chat_explorer_contact"
         )
