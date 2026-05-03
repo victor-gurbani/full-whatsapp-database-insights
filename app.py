@@ -630,7 +630,6 @@ def get_config_json():
         "cfg_ex_groups",
         "cfg_ex_archived",
         "cfg_ex_chan",
-        "cfg_ex_system",
         "cfg_fam_list",
         "cfg_ex_fam_glob",
         "cfg_ex_non_con",
@@ -1432,12 +1431,6 @@ if "data" in st.session_state:
             value=True,
             help="Removes WhatsApp Channels (@newsletter) and Status Broadcasts",
             key="cfg_ex_chan",
-        )
-        exclude_system = st.checkbox(
-            "Exclude System / Security Messages",
-            value=True,
-            help="Removes encryption notices and system markers (Type 7)",
-            key="cfg_ex_system",
         )
 
     with st.sidebar.expander("👥 Contact Management", expanded=True):
