@@ -2578,7 +2578,7 @@ if "data" in st.session_state:
                 elif wc_source == "Received by Me":
                     filter_me = False
 
-                text = analyzer.get_wordcloud_text(
+                text = full_analyzer.get_wordcloud_text(
                     filter_from_me=filter_me,
                     min_word_length=min_word_len,
                     exclude_emails=exclude_emails,
