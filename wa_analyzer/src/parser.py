@@ -625,7 +625,7 @@ class WhatsappParser:
                 on="message_row_id",
                 how="left",
             )
-            merged["is_quote"] = merged["is_quote"].fillna(False).astype(bool)
+            merged["is_quote"] = merged["is_quote"].eq(True)
         else:
             merged["is_quote"] = False
 

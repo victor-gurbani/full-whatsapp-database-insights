@@ -859,6 +859,18 @@ def _format_backup_horizon(value):
     return ts.tz_convert("Europe/Madrid").strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _coerce_bar_chart_data(data):
+    if data is None:
+        return None
+    if isinstance(data, pd.Series):
+        numeric = pd.to_numeric(data, errors="coerce").dropna()
+        return numeric if not numeric.empty else None
+    if isinstance(data, pd.DataFrame):
+        numeric = data.apply(pd.to_numeric, errors="coerce").dropna(how="all")
+        return numeric if not numeric.empty else None
+    return data
+
+
 @st.cache_data(show_spinner=False)
 def load_backup_message_horizon(msgstore_path):
     """Return the latest message timestamp available in the backup."""
@@ -4372,8 +4384,11 @@ if "data" in st.session_state:
             with col_r2:
                 st.write("**Top Global Emojis**")
                 # Top emojis as bar chart
-                top_em = reaction_stats["top_emojis"]
-                st.bar_chart(top_em)
+                top_em = _coerce_bar_chart_data(reaction_stats["top_emojis"])
+                if top_em is not None:
+                    st.bar_chart(top_em)
+                else:
+                    st.info("No emoji reaction data to chart.")
 
         # 3. Mentions
         if mention_stats:
@@ -4381,10 +4396,20 @@ if "data" in st.session_state:
             col_m1, col_m2 = st.columns(2)
             with col_m1:
                 st.write("**Who Mentions Me Most?**")
-                st.bar_chart(mention_stats["who_mentions_me"])
+                who_mentions_me = _coerce_bar_chart_data(
+                    mention_stats["who_mentions_me"]
+                )
+                if who_mentions_me is not None:
+                    st.bar_chart(who_mentions_me)
+                else:
+                    st.info("No incoming mention data to chart.")
             with col_m2:
                 st.write("**Who Do I Mention Most?**")
-                st.bar_chart(mention_stats["i_mention"])
+                i_mention = _coerce_bar_chart_data(mention_stats["i_mention"])
+                if i_mention is not None:
+                    st.bar_chart(i_mention)
+                else:
+                    st.info("No outgoing mention data to chart.")
 
         # 4. Historical Deep Dive
         if history_stats:
@@ -4412,7 +4437,11 @@ if "data" in st.session_state:
 
             if sel_vel_contacts:
                 filtered_vel = velocity_df[velocity_df.index.isin(sel_vel_contacts)]
-                st.bar_chart(filtered_vel, horizontal=True)
+                filtered_vel = _coerce_bar_chart_data(filtered_vel)
+                if filtered_vel is not None:
+                    st.bar_chart(filtered_vel, horizontal=True)
+                else:
+                    st.info("No velocity data to chart for this selection.")
             else:
                 st.write("No contacts selected.")
 
@@ -4453,8 +4482,9 @@ if "data" in st.session_state:
                 if ghost_filter and "True Ghost 👻" in data_to_plot.columns:
                     data_to_plot = data_to_plot[data_to_plot["True Ghost 👻"] > 0]
 
-                if not data_to_plot.empty:
-                    st.bar_chart(data_to_plot.head(15), horizontal=True)
+                data_to_plot = _coerce_bar_chart_data(data_to_plot.head(15))
+                if data_to_plot is not None:
+                    st.bar_chart(data_to_plot, horizontal=True)
                 else:
                     st.info("No ghosts found with current filter.")
             else:
@@ -4477,8 +4507,9 @@ if "data" in st.session_state:
                 if ghost_filter and "True Ghost 👻" in data_to_plot.columns:
                     data_to_plot = data_to_plot[data_to_plot["True Ghost 👻"] > 0]
 
-                if not data_to_plot.empty:
-                    st.bar_chart(data_to_plot.head(15), horizontal=True)
+                data_to_plot = _coerce_bar_chart_data(data_to_plot.head(15))
+                if data_to_plot is not None:
+                    st.bar_chart(data_to_plot, horizontal=True)
                 else:
                     st.info("No ghosts found with current filter.")
             else:
@@ -4923,7 +4954,7 @@ if "data" in st.session_state:
                 unread_display["unread_count_display"] = unread_display.apply(
                     lambda row: "Marked unread"
                     if row["unread_messages_raw"] < 0
-                    else int(row["unread_messages"]),
+                    else str(int(row["unread_messages"])),
                     axis=1,
                 )
                 unread_display["last_message_at"] = pd.to_datetime(
@@ -5143,7 +5174,7 @@ if "data" in st.session_state:
                 overlap_display["unread_count_display"] = overlap_display.apply(
                     lambda row: "Marked unread"
                     if row["unread_messages_raw"] < 0
-                    else int(row["unread_messages"]),
+                    else str(int(row["unread_messages"])),
                     axis=1,
                 )
                 overlap_display["last_message_at"] = pd.to_datetime(
