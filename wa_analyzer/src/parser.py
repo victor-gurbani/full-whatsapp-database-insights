@@ -4,6 +4,19 @@ import vobject
 import os
 
 
+USER_TIMEZONE = "Europe/Madrid"
+
+
+def _to_user_datetime(values, unit="ms"):
+    """Convert WhatsApp UTC millisecond timestamps to the user's local wall time."""
+    converted = pd.to_datetime(values, unit=unit, errors="coerce", utc=True)
+    if isinstance(converted, pd.Series):
+        return converted.dt.tz_convert(USER_TIMEZONE).dt.tz_localize(None)
+    if pd.isna(converted):
+        return converted
+    return converted.tz_convert(USER_TIMEZONE).tz_localize(None)
+
+
 class WhatsappParser:
     def __init__(self, msgstore_path, wa_path, vcf_path):
         self.msgstore_path = msgstore_path
@@ -89,7 +102,7 @@ class WhatsappParser:
                 return pd.DataFrame()
 
         # Convert timestamp to datetime (typically ms in WhatsApp)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df["timestamp"] = _to_user_datetime(df["timestamp"], unit="ms")
         return df
 
     def parse_jids(self):
@@ -347,8 +360,8 @@ class WhatsappParser:
         ):
             read_at_numeric = pd.to_numeric(messages_df["read_at"], errors="coerce")
             mask_invalid = read_at_numeric.isna() | (read_at_numeric <= 0)
-            messages_df["read_at"] = pd.to_datetime(
-                read_at_numeric.where(~mask_invalid), unit="ms", errors="coerce"
+            messages_df["read_at"] = _to_user_datetime(
+                read_at_numeric.where(~mask_invalid), unit="ms"
             )
 
         # Fallback: Use receipt_server_timestamp if read_at is missing
@@ -360,10 +373,9 @@ class WhatsappParser:
                 mask_invalid = messages_df["receipt_server_timestamp"].isna() | (
                     messages_df["receipt_server_timestamp"] <= 0
                 )
-                messages_df["receipt_server_timestamp"] = pd.to_datetime(
+                messages_df["receipt_server_timestamp"] = _to_user_datetime(
                     messages_df["receipt_server_timestamp"].where(~mask_invalid),
                     unit="ms",
-                    errors="coerce",
                 )
 
             messages_df["read_at"] = messages_df["read_at"].fillna(
@@ -378,10 +390,9 @@ class WhatsappParser:
                 mask_invalid = messages_df["received_timestamp"].isna() | (
                     messages_df["received_timestamp"] <= 0
                 )
-                messages_df["received_timestamp"] = pd.to_datetime(
+                messages_df["received_timestamp"] = _to_user_datetime(
                     messages_df["received_timestamp"].where(~mask_invalid),
                     unit="ms",
-                    errors="coerce",
                 )
             incoming_mask = (messages_df["from_me"] == 0) & (
                 messages_df["read_at"].isna()

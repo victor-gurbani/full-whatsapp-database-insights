@@ -58,6 +58,8 @@ import numpy as np
 import string
 import random as _random
 
+USER_TIMEZONE = "Europe/Madrid"
+
 
 # --- Anonymisation Helpers ---
 def _anon_hash(name):
@@ -734,10 +736,10 @@ def load_group_receipt_events(msgstore_path, group_jid):
     if raw.empty:
         return pd.DataFrame(columns=cols)
 
-    raw["msg_timestamp"] = pd.to_datetime(
-        pd.to_numeric(raw["message_ts"], errors="coerce"), unit="ms", errors="coerce"
+    raw["msg_timestamp"] = _to_user_datetime(
+        pd.to_numeric(raw["message_ts"], errors="coerce"), unit="ms"
     )
-    raw["read_timestamp"] = pd.to_datetime(raw["event_ts"], unit="ms", errors="coerce")
+    raw["read_timestamp"] = _to_user_datetime(raw["event_ts"], unit="ms")
     raw = raw.dropna(subset=["msg_timestamp", "read_timestamp", "reader_jid"])
 
     if raw.empty:
@@ -854,9 +856,19 @@ def _format_backup_horizon(value):
     if value is None or pd.isna(value):
         return ""
     ts = pd.Timestamp(value)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    return ts.tz_convert("Europe/Madrid").strftime("%Y-%m-%d %H:%M:%S")
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(USER_TIMEZONE).tz_localize(None)
+    return ts.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _to_user_datetime(values, unit="ms"):
+    """Convert WhatsApp UTC millisecond timestamps to the user's local wall time."""
+    converted = pd.to_datetime(values, unit=unit, errors="coerce", utc=True)
+    if isinstance(converted, pd.Series):
+        return converted.dt.tz_convert(USER_TIMEZONE).dt.tz_localize(None)
+    if pd.isna(converted):
+        return converted
+    return converted.tz_convert(USER_TIMEZONE).tz_localize(None)
 
 
 def _coerce_bar_chart_data(data):
@@ -890,7 +902,7 @@ def load_backup_message_horizon(msgstore_path):
     value = pd.to_numeric(value, errors="coerce")
     if pd.isna(value) or value <= 0:
         return pd.NaT
-    return pd.to_datetime(value, unit="ms", errors="coerce")
+    return _to_user_datetime(value, unit="ms")
 
 
 @st.cache_data(show_spinner=False)
@@ -956,10 +968,9 @@ def load_unread_chat_counters(msgstore_path):
         default="Unread activity",
     )
     unread_df["unread_messages"] = unread_df["unread_messages"].clip(lower=0)
-    unread_df["last_message_at"] = pd.to_datetime(
+    unread_df["last_message_at"] = _to_user_datetime(
         pd.to_numeric(unread_df["sort_timestamp"], errors="coerce"),
         unit="ms",
-        errors="coerce",
     )
     return unread_df[empty_unread_cols]
 
