@@ -836,6 +836,346 @@ def load_vcf_contact_lookup(vcf_path):
         return {}
 
 
+def _count_words_text(value):
+    """Count user-visible word tokens in a message body."""
+    if value is None or pd.isna(value):
+        return 0
+    return len(re.findall(r"\b\w+\b", str(value), flags=re.UNICODE))
+
+
+def _contains_question(value):
+    if value is None or pd.isna(value):
+        return False
+    return "?" in str(value)
+
+
+def _format_backup_horizon(value):
+    if value is None or pd.isna(value):
+        return ""
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert("Europe/Madrid").strftime("%Y-%m-%d %H:%M:%S")
+
+
+@st.cache_data(show_spinner=False)
+def load_backup_message_horizon(msgstore_path):
+    """Return the latest message timestamp available in the backup."""
+    if not msgstore_path or not os.path.exists(msgstore_path):
+        return pd.NaT
+
+    conn = None
+    try:
+        conn = sqlite3.connect(msgstore_path)
+        value = conn.execute("SELECT MAX(timestamp) FROM message").fetchone()[0]
+    except Exception:
+        return pd.NaT
+    finally:
+        if conn is not None:
+            conn.close()
+
+    value = pd.to_numeric(value, errors="coerce")
+    if pd.isna(value) or value <= 0:
+        return pd.NaT
+    return pd.to_datetime(value, unit="ms", errors="coerce")
+
+
+@st.cache_data(show_spinner=False)
+def load_unread_chat_counters(msgstore_path):
+    """Load WhatsApp unread counters from chat metadata."""
+    empty_unread_cols = [
+        "chat_id",
+        "unread_messages",
+        "unread_messages_raw",
+        "unread_rows",
+        "unread_reactions",
+        "unread_comments",
+        "unread_missed_calls",
+        "unread_state",
+        "last_message_at",
+        "archived",
+        "hidden",
+    ]
+
+    if not msgstore_path or not os.path.exists(msgstore_path):
+        return pd.DataFrame(columns=empty_unread_cols)
+
+    chat_query = """
+    SELECT
+        c._id AS chat_id,
+        c.sort_timestamp,
+        COALESCE(c.unseen_message_count, 0) AS unread_messages,
+        COALESCE(c.unseen_row_count, 0) AS unread_rows,
+        COALESCE(c.unseen_missed_calls_count, 0) AS unread_missed_calls,
+        COALESCE(c.unseen_message_reaction_count, 0) AS unread_reactions,
+        COALESCE(c.unseen_comment_message_count, 0) AS unread_comments,
+        COALESCE(c.archived, 0) AS archived,
+        COALESCE(c.hidden, 0) AS hidden
+    FROM chat c
+    WHERE COALESCE(c.unseen_message_count, 0) != 0
+       OR COALESCE(c.unseen_row_count, 0) != 0
+       OR COALESCE(c.unseen_missed_calls_count, 0) != 0
+       OR COALESCE(c.unseen_message_reaction_count, 0) != 0
+       OR COALESCE(c.unseen_comment_message_count, 0) != 0
+    """
+
+    conn = None
+    try:
+        conn = sqlite3.connect(msgstore_path)
+        conn.text_factory = lambda b: b.decode(errors="ignore")
+        unread_df = pd.read_sql_query(chat_query, conn)
+    except Exception:
+        return pd.DataFrame(columns=empty_unread_cols)
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if unread_df.empty:
+        return pd.DataFrame(columns=empty_unread_cols)
+
+    unread_df["unread_messages_raw"] = unread_df["unread_messages"]
+    unread_df["unread_state"] = np.select(
+        [
+            unread_df["unread_messages_raw"] < 0,
+            unread_df["unread_messages_raw"] > 0,
+        ],
+        ["Marked unread", "Unread messages"],
+        default="Unread activity",
+    )
+    unread_df["unread_messages"] = unread_df["unread_messages"].clip(lower=0)
+    unread_df["last_message_at"] = pd.to_datetime(
+        pd.to_numeric(unread_df["sort_timestamp"], errors="coerce"),
+        unit="ms",
+        errors="coerce",
+    )
+    return unread_df[empty_unread_cols]
+
+
+def build_chat_label_frame(df_context):
+    cols = ["chat_id", "type", "chat", "contact_name", "number", "last_message_at"]
+    if (
+        df_context is None
+        or df_context.empty
+        or "chat_row_id" not in df_context.columns
+    ):
+        return pd.DataFrame(columns=cols)
+
+    df = df_context.copy()
+    df["chat_id"] = pd.to_numeric(df["chat_row_id"], errors="coerce")
+    df = df.dropna(subset=["chat_id"])
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+
+    def _first_valid(series, default=""):
+        valid = series.dropna()
+        valid = valid[valid.astype(str).str.strip() != ""]
+        return valid.iloc[0] if not valid.empty else default
+
+    rows = []
+    for chat_id, chat_df in df.groupby("chat_id", sort=False):
+        raw_string = str(_first_valid(chat_df.get("raw_string", pd.Series(dtype=str))))
+        chat_name = str(
+            _first_valid(chat_df.get("chat_name", pd.Series(dtype=str)), raw_string)
+        )
+
+        if raw_string.endswith("@g.us"):
+            chat_type = "Group"
+            number = ""
+            contact_name = ""
+        elif raw_string.endswith("@newsletter") or raw_string == "status@broadcast":
+            chat_type = "Newsletter"
+            number = ""
+            contact_name = ""
+        else:
+            chat_type = "Individual"
+            number = raw_string.split("@", 1)[0] if "@" in raw_string else raw_string
+            contact_name = chat_name
+
+        rows.append(
+            {
+                "chat_id": int(chat_id),
+                "type": chat_type,
+                "chat": chat_name,
+                "contact_name": contact_name if chat_type == "Individual" else "",
+                "number": number,
+                "last_message_at": chat_df["timestamp"].max()
+                if "timestamp" in chat_df.columns
+                else pd.NaT,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=cols)
+
+
+def build_unanswered_chats(df_context, backup_latest_ts):
+    empty_cols = [
+        "chat_id",
+        "type",
+        "chat",
+        "contact_name",
+        "number",
+        "messages_since_reply",
+        "words_since_reply",
+        "question_marks",
+        "has_question",
+        "non_text_messages",
+        "latest_message_at",
+        "waiting_hours_in_backup",
+        "attention_score",
+        "reason",
+        "preview",
+    ]
+    if (
+        df_context is None
+        or df_context.empty
+        or "chat_row_id" not in df_context.columns
+    ):
+        return pd.DataFrame(columns=empty_cols)
+
+    df = df_context.copy()
+    df["chat_id"] = pd.to_numeric(df["chat_row_id"], errors="coerce")
+    df = df.dropna(subset=["chat_id"])
+    if df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    if "message_type" in df.columns:
+        df = df[df["message_type"] != 7]
+    if df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    df["from_me"] = pd.to_numeric(df["from_me"], errors="coerce").fillna(0)
+    df["word_count"] = df["text_data"].apply(_count_words_text)
+    df["has_question"] = df["text_data"].apply(_contains_question)
+    if "message_row_id" not in df.columns:
+        df["message_row_id"] = np.arange(len(df))
+
+    chat_meta = build_chat_label_frame(df).set_index("chat_id")
+    horizon = backup_latest_ts if pd.notna(backup_latest_ts) else df["timestamp"].max()
+    unanswered_rows = []
+
+    for chat_id, chat_msgs in df.groupby("chat_id", sort=False):
+        if chat_id not in chat_meta.index:
+            continue
+
+        chat_msgs = chat_msgs.sort_values(
+            ["timestamp", "message_row_id"], kind="stable"
+        ).reset_index(drop=True)
+        if chat_msgs.empty or int(chat_msgs.iloc[-1]["from_me"]) == 1:
+            continue
+
+        sent_mask = chat_msgs["from_me"] == 1
+        if sent_mask.any():
+            last_sent_pos = int(np.flatnonzero(sent_mask.to_numpy())[-1])
+            trailing = chat_msgs.iloc[last_sent_pos + 1 :].copy()
+        else:
+            trailing = chat_msgs.copy()
+
+        trailing = trailing[trailing["from_me"] == 0]
+        if trailing.empty:
+            continue
+
+        message_count = int(len(trailing))
+        word_count = int(trailing["word_count"].sum())
+        question_marks = int(
+            trailing["text_data"].fillna("").astype(str).str.count(r"\?").sum()
+        )
+        has_question = question_marks > 0
+
+        reasons = []
+        if message_count >= 5:
+            reasons.append("5+ messages")
+        if word_count > 30:
+            reasons.append(">30 words")
+        if has_question:
+            reasons.append("question")
+        if not reasons:
+            continue
+
+        meta = chat_meta.loc[chat_id]
+        latest_message_at = trailing["timestamp"].max()
+        waiting_hours = np.nan
+        if pd.notna(horizon) and pd.notna(latest_message_at):
+            waiting_hours = max(
+                0.0, (pd.Timestamp(horizon) - latest_message_at).total_seconds() / 3600
+            )
+
+        text_parts = [
+            str(v).strip()
+            for v in trailing["text_data"].dropna().tail(3).tolist()
+            if str(v).strip()
+        ]
+        preview = " / ".join(text_parts)
+        if len(preview) > 220:
+            preview = preview[:217] + "..."
+
+        non_text_messages = int((trailing["word_count"] == 0).sum())
+        attention_score = (
+            word_count
+            + message_count * 8
+            + question_marks * 20
+            + min(waiting_hours if pd.notna(waiting_hours) else 0, 72) * 0.25
+        )
+
+        unanswered_rows.append(
+            {
+                "chat_id": int(chat_id),
+                "type": meta["type"],
+                "chat": meta["chat"],
+                "contact_name": meta["contact_name"],
+                "number": meta["number"],
+                "messages_since_reply": message_count,
+                "words_since_reply": word_count,
+                "question_marks": question_marks,
+                "has_question": has_question,
+                "non_text_messages": non_text_messages,
+                "latest_message_at": latest_message_at,
+                "waiting_hours_in_backup": waiting_hours,
+                "attention_score": round(attention_score, 1),
+                "reason": ", ".join(reasons),
+                "preview": preview,
+            }
+        )
+
+    unanswered_df = pd.DataFrame(unanswered_rows, columns=empty_cols)
+    if not unanswered_df.empty:
+        unanswered_df = unanswered_df.sort_values(
+            ["attention_score", "latest_message_at"], ascending=[False, False]
+        )
+    return unanswered_df
+
+
+def build_unread_chats_for_context(df_context, msgstore_path):
+    labels = build_chat_label_frame(df_context)
+    counters = load_unread_chat_counters(msgstore_path)
+    if labels.empty or counters.empty:
+        return pd.DataFrame(
+            columns=[
+                "chat_id",
+                "type",
+                "chat",
+                "contact_name",
+                "number",
+                "unread_messages",
+                "unread_messages_raw",
+                "unread_rows",
+                "unread_reactions",
+                "unread_comments",
+                "unread_missed_calls",
+                "unread_state",
+                "last_message_at",
+                "archived",
+                "hidden",
+            ]
+        )
+
+    unread_df = counters.merge(labels, on="chat_id", how="inner", suffixes=("", "_ctx"))
+    unread_df["last_message_at"] = unread_df["last_message_at_ctx"].fillna(
+        unread_df["last_message_at"]
+    )
+    unread_df = unread_df.drop(columns=["last_message_at_ctx"], errors="ignore")
+    return unread_df.sort_values("last_message_at", ascending=False)
+
+
 # Sidebar
 st.sidebar.header("Data Sources")
 
@@ -965,6 +1305,11 @@ if "data" in st.session_state:
         st.caption(
             f"**{av(n_sent, _anon_numbers):,}** sent · **{av(n_recv, _anon_numbers):,}** received"
         )
+        backup_message_horizon = load_backup_message_horizon(msgstore_path)
+        if pd.notna(backup_message_horizon):
+            st.caption(
+                f"Backup message horizon: **{_format_backup_horizon(backup_message_horizon)}**"
+            )
 
     with st.sidebar.expander("🔒 Anonymisation", expanded=False):
         anon_mode = st.selectbox(
@@ -1231,7 +1576,7 @@ if "data" in st.session_state:
     _frag_kpi()
 
     # --- Tabs ---
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
         [
             "📊 Activity & Top Users",
             "🔥 Behavioral Patterns",
@@ -1242,6 +1587,7 @@ if "data" in st.session_state:
             "🎪 Fun & Insights",
             "🗺️ Map",
             "📱 Chat Viewer",
+            "📥 Inbox Triage",
         ]
     )
 
@@ -4413,6 +4759,451 @@ if "data" in st.session_state:
 
     with tab9:
         _frag_chat_viewer()
+
+    @st.fragment
+    def _frag_inbox_triage():
+        st.header("📥 Inbox Triage")
+        st.caption(
+            "Unread counts come from WhatsApp chat counters. Needs-reply chats are trailing incoming bursts since your last sent message."
+        )
+
+        def _prepare_inbox_display(source_df):
+            display_df = source_df.copy()
+            if _anon_key == "off" or display_df.empty or "number" not in display_df:
+                return display_df
+
+            anon_fn = {
+                "hash": _anon_hash,
+                "hash_cut": _anon_hash_cut,
+                "random": _anon_random,
+            }[_anon_key]
+
+            def _anon_number(value):
+                if value is None or pd.isna(value) or str(value).strip() == "":
+                    return value
+                return anon_fn(str(value))
+
+            display_df["number"] = display_df["number"].map(_anon_number)
+            return display_df
+
+        with st.spinner("Reading inbox state..."):
+            backup_latest = load_backup_message_horizon(msgstore_path)
+            unread_df = build_unread_chats_for_context(df_base, msgstore_path)
+            unanswered_df = build_unanswered_chats(df_base, backup_latest)
+
+        if unread_df.empty and unanswered_df.empty:
+            st.warning("No unread or needs-reply data could be loaded from msgstore.")
+            return
+
+        if pd.notna(backup_latest):
+            st.caption(
+                f"Backup message horizon: {_format_backup_horizon(backup_latest)}"
+            )
+
+        overlap_ids = (
+            set(unread_df["chat_id"]).intersection(unanswered_df["chat_id"])
+            if not unread_df.empty and not unanswered_df.empty
+            else set()
+        )
+        if not unread_df.empty:
+            unread_df = unread_df.copy()
+            unread_df["needs_reply"] = unread_df["chat_id"].isin(overlap_ids)
+        if not unanswered_df.empty:
+            unanswered_df = unanswered_df.copy()
+            unanswered_df["is_unread"] = unanswered_df["chat_id"].isin(overlap_ids)
+
+        unread_messages_total = (
+            int(unread_df["unread_messages"].sum()) if not unread_df.empty else 0
+        )
+        direct_unread_total = (
+            int(unread_df.loc[unread_df["type"] == "Individual", "unread_messages"].sum())
+            if not unread_df.empty
+            else 0
+        )
+        manual_unread_total = (
+            int((unread_df["unread_messages_raw"] < 0).sum())
+            if not unread_df.empty
+            else 0
+        )
+        unanswered_words_total = (
+            int(unanswered_df["words_since_reply"].sum())
+            if not unanswered_df.empty
+            else 0
+        )
+        unanswered_messages_total = (
+            int(unanswered_df["messages_since_reply"].sum())
+            if not unanswered_df.empty
+            else 0
+        )
+        question_chats = (
+            int(unanswered_df["has_question"].sum()) if not unanswered_df.empty else 0
+        )
+
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        k1.metric("Unread Chats", av(len(unread_df), _anon_numbers))
+        k2.metric("Unread Messages", f"{av(unread_messages_total, _anon_numbers):,}")
+        k3.metric("Direct Unread", f"{av(direct_unread_total, _anon_numbers):,}")
+        k4.metric("Marked Unread", av(manual_unread_total, _anon_numbers))
+        k5.metric("Needs Reply", av(len(unanswered_df), _anon_numbers))
+        k6.metric("Unread + Reply", av(len(overlap_ids), _anon_numbers))
+
+        unread_tab, unanswered_tab, stats_tab = st.tabs(
+            ["Unread Chats", "Needs Reply", "Stats"]
+        )
+
+        with unread_tab:
+            st.subheader("Unread Chats")
+            if unread_df.empty:
+                st.info("No unread chats found in the current msgstore counters.")
+            else:
+                sort_choice = st.selectbox(
+                    "Sort unread chats by",
+                    ["Last message (newest)", "Unread messages", "Chat"],
+                    key="inbox_unread_sort",
+                )
+                unread_sorted = unread_df.copy()
+                if sort_choice == "Unread messages":
+                    unread_sorted = unread_sorted.sort_values(
+                        ["unread_messages", "unread_rows", "last_message_at"],
+                        ascending=[False, False, False],
+                    )
+                elif sort_choice == "Chat":
+                    unread_sorted = unread_sorted.sort_values("chat")
+                else:
+                    unread_sorted = unread_sorted.sort_values(
+                        "last_message_at", ascending=False
+                    )
+
+                unread_display = _prepare_inbox_display(unread_sorted)
+                unread_display["unread_count_display"] = unread_display.apply(
+                    lambda row: "Marked unread"
+                    if row["unread_messages_raw"] < 0
+                    else int(row["unread_messages"]),
+                    axis=1,
+                )
+                unread_display["last_message_at"] = pd.to_datetime(
+                    unread_display["last_message_at"], errors="coerce"
+                ).dt.strftime("%Y-%m-%d %H:%M")
+                unread_display = unread_display.rename(
+                    columns={
+                        "chat": "Chat",
+                        "type": "Type",
+                        "contact_name": "Contact",
+                        "number": "Number",
+                        "unread_count_display": "Unread",
+                        "unread_rows": "Unread rows",
+                        "unread_reactions": "Unread reactions",
+                        "unread_comments": "Unread comments",
+                        "unread_missed_calls": "Unread missed calls",
+                        "unread_state": "Unread status",
+                        "last_message_at": "Last message",
+                        "needs_reply": "Needs reply",
+                        "archived": "Archived",
+                    }
+                )
+                st.dataframe(
+                    unread_display[
+                        [
+                            "Chat",
+                            "Type",
+                            "Contact",
+                            "Number",
+                            "Unread",
+                            "Unread status",
+                            "Unread rows",
+                            "Unread reactions",
+                            "Unread comments",
+                            "Unread missed calls",
+                            "Needs reply",
+                            "Last message",
+                            "Archived",
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+                chart_l, chart_r = st.columns(2)
+                with chart_l:
+                    unread_by_type = (
+                        unread_df.groupby("type", as_index=False)
+                        .size()
+                        .rename(columns={"size": "chats"})
+                    )
+                    fig = px.pie(
+                        unread_by_type,
+                        names="type",
+                        values="chats",
+                        title="Unread chats by type",
+                    )
+                    st.plotly_chart(fig, width="stretch")
+
+                with chart_r:
+                    unread_messages_by_type = unread_df.groupby(
+                        "type", as_index=False
+                    )["unread_messages"].sum()
+                    fig = px.pie(
+                        unread_messages_by_type,
+                        names="type",
+                        values="unread_messages",
+                        title="Unread message count by type",
+                    )
+                    st.plotly_chart(fig, width="stretch")
+
+                top_unread = unread_display[
+                    pd.to_numeric(unread_display["Unread"], errors="coerce").fillna(0)
+                    > 0
+                ].copy()
+                top_unread["Unread numeric"] = pd.to_numeric(
+                    top_unread["Unread"], errors="coerce"
+                ).fillna(0)
+                top_unread = top_unread.nlargest(20, "Unread numeric")
+                fig = px.bar(
+                    top_unread,
+                    x="Unread numeric",
+                    y="Chat",
+                    color="Type",
+                    orientation="h",
+                    title="Top unread chats",
+                )
+                fig.update_layout(yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig, width="stretch")
+
+        with unanswered_tab:
+            st.subheader("Other Chats That Haven't Been Answered")
+            st.caption(
+                "Included when the latest incoming burst has 5+ messages, more than 30 words, or at least one question mark."
+            )
+
+            if unanswered_df.empty:
+                st.info("No chats currently match the needs-reply rules.")
+            else:
+                sort_choice = st.selectbox(
+                    "Sort needs-reply chats by",
+                    ["Attention score", "Last message (newest)", "Words", "Messages"],
+                    key="inbox_unanswered_sort",
+                )
+                unanswered_sorted = unanswered_df.copy()
+                if sort_choice == "Last message (newest)":
+                    unanswered_sorted = unanswered_sorted.sort_values(
+                        "latest_message_at", ascending=False
+                    )
+                elif sort_choice == "Words":
+                    unanswered_sorted = unanswered_sorted.sort_values(
+                        "words_since_reply", ascending=False
+                    )
+                elif sort_choice == "Messages":
+                    unanswered_sorted = unanswered_sorted.sort_values(
+                        "messages_since_reply", ascending=False
+                    )
+                else:
+                    unanswered_sorted = unanswered_sorted.sort_values(
+                        ["attention_score", "latest_message_at"],
+                        ascending=[False, False],
+                    )
+
+                unanswered_display = _prepare_inbox_display(unanswered_sorted)
+                table_df = unanswered_display.copy()
+                table_df["waiting_hours_in_backup"] = table_df[
+                    "waiting_hours_in_backup"
+                ].round(1)
+                table_df["latest_message_at"] = pd.to_datetime(
+                    table_df["latest_message_at"], errors="coerce"
+                ).dt.strftime("%Y-%m-%d %H:%M")
+                table_df = table_df.rename(
+                    columns={
+                        "chat": "Chat",
+                        "type": "Type",
+                        "contact_name": "Contact",
+                        "number": "Number",
+                        "messages_since_reply": "Messages",
+                        "words_since_reply": "Words",
+                        "question_marks": "?",
+                        "waiting_hours_in_backup": "Hours waiting",
+                        "attention_score": "Attention score",
+                        "latest_message_at": "Latest message",
+                        "reason": "Why included",
+                        "preview": "Preview",
+                        "is_unread": "Unread too",
+                    }
+                )
+                st.dataframe(
+                    table_df[
+                        [
+                            "Chat",
+                            "Type",
+                            "Contact",
+                            "Number",
+                            "Messages",
+                            "Words",
+                            "?",
+                            "Hours waiting",
+                            "Attention score",
+                            "Latest message",
+                            "Unread too",
+                            "Why included",
+                            "Preview",
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+        with stats_tab:
+            st.subheader("Inbox Pressure Stats")
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric(
+                "Unanswered Messages",
+                f"{av(unanswered_messages_total, _anon_numbers):,}",
+            )
+            s2.metric("Question Chats", av(question_chats, _anon_numbers))
+            stale_chats = (
+                int((unanswered_df["waiting_hours_in_backup"] >= 24).sum())
+                if not unanswered_df.empty
+                else 0
+            )
+            s3.metric("Waiting 24h+", av(stale_chats, _anon_numbers))
+            overlap = (
+                len(set(unread_df["chat_id"]).intersection(unanswered_df["chat_id"]))
+                if not unread_df.empty and not unanswered_df.empty
+                else 0
+            )
+            s4.metric("Unread + Needs Reply", av(overlap, _anon_numbers))
+
+            if unanswered_df.empty:
+                st.info("Needs-reply charts will appear once matching chats exist.")
+                return
+
+            unanswered_display = _prepare_inbox_display(unanswered_df)
+
+            if overlap:
+                st.subheader("Unread Chats That Also Need Reply")
+                overlap_df = unread_df[unread_df["chat_id"].isin(overlap_ids)].merge(
+                    unanswered_df[
+                        [
+                            "chat_id",
+                            "messages_since_reply",
+                            "words_since_reply",
+                            "question_marks",
+                            "attention_score",
+                            "reason",
+                        ]
+                    ],
+                    on="chat_id",
+                    how="left",
+                )
+                overlap_display = _prepare_inbox_display(
+                    overlap_df.sort_values("last_message_at", ascending=False)
+                )
+                overlap_display["unread_count_display"] = overlap_display.apply(
+                    lambda row: "Marked unread"
+                    if row["unread_messages_raw"] < 0
+                    else int(row["unread_messages"]),
+                    axis=1,
+                )
+                overlap_display["last_message_at"] = pd.to_datetime(
+                    overlap_display["last_message_at"], errors="coerce"
+                ).dt.strftime("%Y-%m-%d %H:%M")
+                overlap_display = overlap_display.rename(
+                    columns={
+                        "chat": "Chat",
+                        "type": "Type",
+                        "number": "Number",
+                        "unread_count_display": "Unread",
+                        "messages_since_reply": "Needs-reply messages",
+                        "words_since_reply": "Needs-reply words",
+                        "question_marks": "?",
+                        "attention_score": "Attention score",
+                        "last_message_at": "Last message",
+                        "reason": "Why included",
+                    }
+                )
+                st.dataframe(
+                    overlap_display[
+                        [
+                            "Chat",
+                            "Type",
+                            "Number",
+                            "Unread",
+                            "Needs-reply messages",
+                            "Needs-reply words",
+                            "?",
+                            "Attention score",
+                            "Last message",
+                            "Why included",
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            chart_a, chart_b = st.columns(2)
+            with chart_a:
+                by_type = (
+                    unanswered_df.groupby("type", as_index=False)
+                    .size()
+                    .rename(columns={"size": "chats"})
+                )
+                fig = px.pie(
+                    by_type,
+                    names="type",
+                    values="chats",
+                    title="Needs-reply chats by type",
+                )
+                st.plotly_chart(fig, width="stretch")
+
+            with chart_b:
+                words_by_type = unanswered_df.groupby("type", as_index=False)[
+                    "words_since_reply"
+                ].sum()
+                fig = px.pie(
+                    words_by_type,
+                    names="type",
+                    values="words_since_reply",
+                    title="Unanswered words by type",
+                )
+                st.plotly_chart(fig, width="stretch")
+
+            scatter_df = unanswered_display.copy()
+            fig = px.scatter(
+                scatter_df,
+                x="messages_since_reply",
+                y="words_since_reply",
+                size="attention_score",
+                color="type",
+                hover_name="chat",
+                hover_data={
+                    "question_marks": True,
+                    "waiting_hours_in_backup": ":.1f",
+                    "attention_score": ":.1f",
+                },
+                title="Unanswered burst size vs word load",
+                labels={
+                    "messages_since_reply": "Messages since your last reply",
+                    "words_since_reply": "Words since your last reply",
+                },
+            )
+            st.plotly_chart(fig, width="stretch")
+
+            top_pressure = unanswered_display.nlargest(20, "attention_score")
+            fig = px.bar(
+                top_pressure,
+                x="attention_score",
+                y="chat",
+                color="type",
+                orientation="h",
+                title="Highest attention score",
+                labels={"attention_score": "Attention score", "chat": "Chat"},
+            )
+            fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig, width="stretch")
+
+            st.caption(
+                "Attention score blends unanswered words, message count, question marks, and waiting time within the backup window."
+            )
+
+    with tab10:
+        _frag_inbox_triage()
 
 else:
     st.info("👈 Please enter file paths.")
