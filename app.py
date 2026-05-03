@@ -1574,9 +1574,11 @@ if "data" in st.session_state:
                 ~df_group_base["chat_row_id"].isin(archived_chat_ids)
             ]
 
-        if exclude_low_participation and "raw_string" in df_base.columns:
-            is_group_mask = df_base["raw_string"].astype(str).str.endswith("@g.us")
-            group_chats = df_base[is_group_mask]
+        if exclude_low_participation and "raw_string" in df_group_base.columns:
+            is_group_mask = (
+                df_group_base["raw_string"].astype(str).str.endswith("@g.us")
+            )
+            group_chats = df_group_base[is_group_mask]
 
             groups_to_exclude = set()
             for chat_id, group_df in group_chats.groupby("chat_name"):
@@ -1592,6 +1594,9 @@ if "data" in st.session_state:
 
             if groups_to_exclude:
                 df_base = df_base[~df_base["chat_name"].isin(groups_to_exclude)]
+                df_group_base = df_group_base[
+                    ~df_group_base["chat_name"].isin(groups_to_exclude)
+                ]
 
         if exclude_channels and "raw_string" in df_base.columns:
             is_channel = (
@@ -1615,10 +1620,16 @@ if "data" in st.session_state:
                 ~df_group_base["chat_name"].isin(family_list_inner)
             ]
         if exclude_non_contacts:
-            mask_nums = df_base["contact_name"].apply(
-                lambda name: not bool(re.search("[a-zA-Z]", str(name)))
-            )
-            df_base = df_base[~mask_nums]
+            if "contact_name" in df_base.columns:
+                mask_nums = df_base["contact_name"].apply(
+                    lambda name: not bool(re.search("[a-zA-Z]", str(name)))
+                )
+                df_base = df_base[~mask_nums]
+            if "contact_name" in df_group_base.columns:
+                group_mask_nums = df_group_base["contact_name"].apply(
+                    lambda name: not bool(re.search("[a-zA-Z]", str(name)))
+                )
+                df_group_base = df_group_base[~group_mask_nums]
 
         return df_base, df_group_base
 
