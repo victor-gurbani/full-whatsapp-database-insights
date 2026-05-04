@@ -1,5 +1,21 @@
 """Streamlit application entrypoint."""
 
+from importlib import import_module
+
+
+TAB_SPECS = (
+    ("activity", "📊 Activity & Top Users", "wa_analyzer.app.tabs.activity"),
+    ("behavioral", "🔥 Behavioral Patterns", "wa_analyzer.app.tabs.behavioral"),
+    ("gender", "👫 Gender Insights", "wa_analyzer.app.tabs.gender"),
+    ("wordcloud", "📝 Word Cloud", "wa_analyzer.app.tabs.wordcloud"),
+    ("chat_explorer", "🔍 Chat Explorer", "wa_analyzer.app.tabs.chat_explorer"),
+    ("group_explorer", "👥 Group Explorer", "wa_analyzer.app.tabs.group_explorer"),
+    ("fun_insights", "🎪 Fun & Insights", "wa_analyzer.app.tabs.fun_insights"),
+    ("map_view", "🗺️ Map", "wa_analyzer.app.tabs.map_view"),
+    ("chat_viewer", "📱 Chat Viewer", "wa_analyzer.app.tabs.chat_viewer"),
+    ("inbox_triage", "📥 Inbox Triage", "wa_analyzer.app.tabs.inbox_triage"),
+)
+
 
 def run_app() -> None:
     import matplotlib.pyplot as plt
@@ -17,18 +33,6 @@ def run_app() -> None:
 
     from wa_analyzer.app.privacy import av
     from wa_analyzer.app.sidebar import render_sidebar
-    from wa_analyzer.app.tabs import (
-        activity,
-        behavioral,
-        chat_explorer,
-        chat_viewer,
-        fun_insights,
-        gender,
-        group_explorer,
-        inbox_triage,
-        map_view,
-        wordcloud,
-    )
 
     # Page Config
     st.set_page_config(page_title="WhatsApp Analytics", layout="wide", page_icon="💬")
@@ -66,61 +70,23 @@ def run_app() -> None:
 
         _frag_kpi()
 
-        # --- Tabs ---
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
-            [
-                "📊 Activity & Top Users",
-                "🔥 Behavioral Patterns",
-                "👫 Gender Insights",
-                "📝 Word Cloud",
-                "🔍 Chat Explorer",
-                "👥 Group Explorer",
-                "🎪 Fun & Insights",
-                "🗺️ Map",
-                "📱 Chat Viewer",
-                "📥 Inbox Triage",
-            ]
+        # --- Lazy active tab ---
+        tab_labels = [label for _, label, _ in TAB_SPECS]
+        active_label = st.segmented_control(
+            "Analysis section",
+            tab_labels,
+            default=tab_labels[0],
+            key="active_analysis_tab",
+            label_visibility="collapsed",
         )
+        if active_label is None:
+            active_label = tab_labels[0]
 
-
-        with tab1:
-            activity.render(ctx)
-
-
-        with tab2:
-            behavioral.render(ctx)
-
-
-        with tab3:
-            gender.render(ctx)
-
-
-        with tab4:
-            wordcloud.render(ctx)
-
-
-        with tab5:
-            chat_explorer.render(ctx)
-
-
-        with tab6:
-            group_explorer.render(ctx)
-
-
-        with tab7:
-            fun_insights.render(ctx)
-
-
-        with tab8:
-            map_view.render(ctx)
-
-
-        with tab9:
-            chat_viewer.render(ctx)
-
-
-        with tab10:
-            inbox_triage.render(ctx)
+        module_name = next(
+            module for _, label, module in TAB_SPECS if label == active_label
+        )
+        active_tab = import_module(module_name)
+        active_tab.render(ctx)
 
     else:
         st.info("👈 Please enter file paths.")
