@@ -1,70 +1,27 @@
 from __future__ import annotations
 
 import re
-import threading
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
-from matplotlib import pyplot as plt
-from streamlit.runtime.scriptrunner import add_script_run_ctx
-from wordcloud import WordCloud
 
 from wa_analyzer.app.db_loaders import (
     _coerce_bar_chart_data,
-    _format_backup_horizon,
-    _format_inbox_gender,
-    build_unanswered_chats,
-    build_unread_chats_for_context,
-    load_backup_message_horizon,
-    load_group_receipt_events,
-    load_jid_raw_lookup,
-    load_lid_jid_map,
-    load_vcf_contact_lookup,
 )
-from wa_analyzer.app.filters import is_number
-from wa_analyzer.app.privacy import _anon_hash, _anon_hash_cut, _anon_random, av
-from wa_analyzer.app.race_video import build_rolling_counts, render_contact_race_video
+from wa_analyzer.app.privacy import av
 from wa_analyzer.app.state import AppContext
-from wa_analyzer.app.ui_helpers import get_correlation_text
-from wa_analyzer.src.analyzer import WhatsappAnalyzer
-from wa_analyzer.src.chat_viewer import (
-    export_chat_html_standalone,
-    export_chat_json,
-    export_chat_txt,
-    generate_chat_html,
-)
 
 
 @st.fragment
 def render(ctx: AppContext) -> None:
-    analyzer = ctx.analyzer
     full_analyzer = ctx.full_analyzer
-    df_raw = ctx.df_raw
     df_base = ctx.df_base
-    df_group_base = ctx.df_group_base
-    filtered_df = ctx.filtered_df
-    msgstore_path = ctx.msgstore_path
-    wa_path = ctx.wa_path
-    vcf_path = ctx.vcf_path
-    msgstore_file_signature = ctx.msgstore_file_signature
     me_display = ctx.me_display
-    _anon_key = ctx._anon_key
     _anon_numbers = ctx._anon_numbers
     exclude_groups = ctx.exclude_groups
     exclude_me = ctx.exclude_me
     exclude_non_contacts = ctx.exclude_non_contacts
-    exclude_family_gender = ctx.exclude_family_gender
-    exclude_family_global = ctx.exclude_family_global
-    exclude_family_behavior = ctx.exclude_family_behavior
-    family_list = list(ctx.family_list)
-    use_medians = ctx.use_medians
-    use_longer_stats = ctx.use_longer_stats
-    reply_threshold_hours = ctx.reply_threshold_hours
-    min_word_len = ctx.min_word_len
-    exclude_emails = ctx.exclude_emails
 
     st.header("🎪 Fun & Insights")
 
@@ -81,34 +38,32 @@ def render(ctx: AppContext) -> None:
     # Pass exclude_groups from sidebar
     # Calculate Stats using FULL Data (Context needed for Double Text, Streaks, Killers)
     # But we must respect exclude_me for the DISPLAY.
-    full_analyzer_tab6 = full_analyzer
-
-    ex_groups = exclude_groups if "exclude_groups" in locals() else False
+    ex_groups = exclude_groups
 
     with st.spinner("Crunching fun stats..."):
-        beh_scorecard = full_analyzer_tab6.get_behavioral_scorecard(
+        beh_scorecard = full_analyzer.get_behavioral_scorecard(
             exclude_groups=True
         )
-        fun_stats = full_analyzer_tab6.get_fun_stats(
+        fun_stats = full_analyzer.get_fun_stats(
             top_n=top_n_val, exclude_groups=True
         )
-        streaks = full_analyzer_tab6.get_streak_stats(exclude_groups=ex_groups)
-        killers = full_analyzer_tab6.get_conversation_killers(
+        streaks = full_analyzer.get_streak_stats(exclude_groups=ex_groups)
+        killers = full_analyzer.get_conversation_killers(
             exclude_groups=ex_groups
         )
 
     # New Stats
     # Pass exclude_me (global) to filter "Me" from top reactors
-    reaction_stats = full_analyzer_tab6.get_reaction_stats(
+    reaction_stats = full_analyzer.get_reaction_stats(
         exclude_groups=ex_groups, exclude_me=exclude_me
     )
-    emoji_stats = full_analyzer_tab6.get_emoji_stats(
+    emoji_stats = full_analyzer.get_emoji_stats(
         top_n=top_n_val, exclude_groups=ex_groups
     )
-    mention_stats = full_analyzer_tab6.get_mention_stats(
+    mention_stats = full_analyzer.get_mention_stats(
         top_n=top_n_val, exclude_groups=ex_groups
     )
-    history_stats = full_analyzer_tab6.get_historical_stats(
+    history_stats = full_analyzer.get_historical_stats(
         exclude_groups=ex_groups
     )
 
@@ -117,8 +72,7 @@ def render(ctx: AppContext) -> None:
         # Identify 'Me' name (usually 'You', 'Me', 'Myself' or me_display)
         # Parser ensures outgoing is mapped to "You".
         me_names = ["You", "Me", "Myself"]
-        if "me_display" in locals():
-            me_names.append(str(me_display))  # if resolved
+        me_names.append(str(me_display))
 
         # Filter Index (usually contact_name)
         if not beh_scorecard.empty:
@@ -370,6 +324,7 @@ def render(ctx: AppContext) -> None:
     # --- NEW SECTIONS ---
 
     # 1. Emoji Analysis
+    default_selection = []
     if emoji_stats and not emoji_stats["per_contact"].empty:
         st.subheader("❤️ The Emoji Fanatic")
         # Show Top 5 Emojis for Top 5 Users
@@ -381,7 +336,7 @@ def render(ctx: AppContext) -> None:
         # Group by contact, join emojis
         # --- UI IMPROVEMENT: Default Top 10 (Most Active) + Search ---
         # Get top talkers for default selection
-        top_active = full_analyzer_tab6.get_top_talkers(n=10, metric="messages")
+        top_active = full_analyzer.get_top_talkers(n=10, metric="messages")
         default_selection = (
             top_active["contact_name"].tolist() if not top_active.empty else []
         )
@@ -467,12 +422,9 @@ def render(ctx: AppContext) -> None:
         velocity_df = history_stats["velocity_wpm"]  # Series
         all_vel_contacts = velocity_df.index.tolist()
 
-        # Reuse default_selection (Top 10 Active) from above if available, else recalc or slice
-        if "default_selection" in locals():
-            default_vel = [c for c in default_selection if c in all_vel_contacts]
-            if not default_vel:
-                default_vel = all_vel_contacts[:10]
-        else:
+        # Reuse emoji defaults when available, else use the first contacts.
+        default_vel = [c for c in default_selection if c in all_vel_contacts]
+        if not default_vel:
             default_vel = all_vel_contacts[:10]
 
         sel_vel_contacts = st.multiselect(
@@ -513,7 +465,7 @@ def render(ctx: AppContext) -> None:
 
     with col_lod1:
         st.write("**People I Ignore** (Me → Them)")
-        my_ignore_stats = full_analyzer_tab6.get_left_on_read_stats()
+        my_ignore_stats = full_analyzer.get_left_on_read_stats()
 
         if not my_ignore_stats.empty:
             cols_to_plot = [
@@ -536,7 +488,7 @@ def render(ctx: AppContext) -> None:
 
     with col_lod2:
         st.write("**People Who Ignore Me** (Them → Me)")
-        them_ignore_stats = full_analyzer_tab6.get_true_ghosting_stats(
+        them_ignore_stats = full_analyzer.get_true_ghosting_stats(
             threshold_hours=24
         )  # ghosting = them ignoring me
 
