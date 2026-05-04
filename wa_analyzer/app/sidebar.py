@@ -36,6 +36,11 @@ from wa_analyzer.src.analyzer import WhatsappAnalyzer
 from wa_analyzer.src.parser import WhatsappParser
 
 
+@st.cache_resource(show_spinner=False)
+def _build_cached_analyzer(_df, cache_key, use_medians):
+    return WhatsappAnalyzer(_df, use_medians=use_medians)
+
+
 # --- Config Management Functions ---
 def load_config():
     uploaded_file = st.session_state.get("config_uploader")
@@ -392,8 +397,27 @@ def render_sidebar() -> AppContext | None:
 
         st.sidebar.markdown(f"**User**: {me_display}")
 
-        analyzer = WhatsappAnalyzer(filtered_df, use_medians=use_medians)
-        full_analyzer = WhatsappAnalyzer(df_base, use_medians=use_medians)
+        family_tuple = tuple(family_list) if family_list else ()
+        base_analyzer_key = (
+            id(st.session_state["data"]),
+            _anon_key,
+            date_start,
+            date_end,
+            exclude_groups,
+            exclude_archived,
+            msgstore_file_signature,
+            exclude_low_participation,
+            exclude_channels,
+            exclude_family_global,
+            family_tuple,
+            exclude_non_contacts,
+            use_medians,
+        )
+        filtered_analyzer_key = base_analyzer_key + (exclude_me,)
+        analyzer = _build_cached_analyzer(
+            filtered_df, filtered_analyzer_key, use_medians
+        )
+        full_analyzer = _build_cached_analyzer(df_base, base_analyzer_key, use_medians)
         app_context = AppContext(
             raw_df=st.session_state["data"],
             display_df=df_raw,
@@ -416,7 +440,7 @@ def render_sidebar() -> AppContext | None:
                     exclude_non_contacts=exclude_non_contacts,
                     exclude_family_gender=exclude_family_gender,
                     exclude_family_behavior=exclude_family_behavior,
-                    family_list=tuple(family_list) if family_list else (),
+                    family_list=family_tuple,
                 ),
                 anonymization=AnonymizationState(
                     mode_label=_anon_mode_label,
